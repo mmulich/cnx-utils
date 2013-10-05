@@ -10,7 +10,10 @@ import os
 import lxml.etree
 
 
-__all__ = ('parse_collection_xml', 'parse_module_xml',)
+__all__ = (
+    'parse_collection_xml', 'parse_collectionL_xml_contents',
+    'parse_module_xml',
+    )
 
 
 def _generate_xpath_func(xml_doc, default_namespace_name='base'):
@@ -90,6 +93,15 @@ def parse_collection_xml(fp):
     data = _parse_common_elements(doc)
     data[2]['portal_type'] = 'Collection'
     return data
+
+
+def parse_collection_xml_contents(fp):
+    """Parse the file to find the collections contents."""
+    # Parse the document
+    tree = lxml.etree.parse(fp)
+    doc = tree.getroot()
+    xpath = _generate_xpath_func(doc, 'colxml')
+    return xpath('//colxml:module/@document')[:]
 
 
 def parse_module_xml(fp):

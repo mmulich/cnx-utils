@@ -10,7 +10,7 @@ from legacy_populate import parsers
 
 
 MODULE = 'Module'
-COLLECTION = 'COLLECTION'
+COLLECTION = 'Collection'
 TYPES_TO_PARSERS = {
     MODULE: parsers.parse_module_xml,
     COLLECTION: parsers.parse_collection_xml,
@@ -153,13 +153,16 @@ class Populator:
         """Given the moduleid populate the database with all the versions
         of this module.
         """
-        module_idents = []
         for metadata, content in self.resolver(mid):
             m_ident, m_type = self.insert_module(metadata, content)
-            module_idents.append(m_ident)
-        # TODO resolve modules connected to a resource.
-        # TODO resolve resources for each module.
-        return self._translate_module_idents(module_idents)
+            yield m_ident
+            # Resolve modules connected to a module.
+            if m_type == COLLECTION:
+                for ext_mid in self._get_module_contents(m_ident):
+                    for ext_ident in self(ext_mid):
+                        yield ext_ident
+        # TODO Resolve resources for each module.
+        raise StopIteration
 
     def insert_module(self, module_data, document):
         metadata = module_data['metadata']
@@ -180,16 +183,17 @@ class Populator:
                     _insert_keyword_for_module(keyword, module_ident, cursor)
         return module_ident, module_type
 
-    def _translate_module_idents(self, idents=[]):
-        translated = []
+    def _get_module_contents(self, ident):
         with psycopg2.connect(self.connection_string) as db_connection:
             with db_connection.cursor() as cursor:
-                for ident in idents:
-                    cursor.execute("SELECT moduleid, version, portal_type "
-                                   "  FROM modules "
-                                   "  WHERE module_ident = %s", (ident,))
-                    translated.append(cursor.fetchone())
-        return translated
+                cursor.execute("SELECT f.file FROM files AS f, "
+                               "                 module_files AS mf"
+                               "  WHERE mf.module_ident = %s "
+                               "        AND f.fileid = mf.fileid;",
+                               (ident,))
+                file = cursor.fetchone()[0]
+        mids = parsers.parse_collection_xml_contents(BytesIO(file[:]))
+        return mids
 
 
 def main(argv=None):
@@ -205,12 +209,16 @@ def main(argv=None):
     args = parser.parse_args(argv)
     populator = Populator(args.connection_string, args.source_host)
 
-    with psycopg2.connect(args.connection_string) as db_connection:
-        for mid in args.modules:
-            idents = populator(mid)
-            for id, version, type in idents:
-                print("-- INSERTED -- id={} version={} type={}" \
-                          .format(id, version, type))
+    for mid in args.modules:
+        for ident in populator(mid):
+            with psycopg2.connect(args.connection_string) as db_connection:
+                with db_connection.cursor() as cursor:
+                    cursor.execute("SELECT moduleid, version, portal_type "
+                                   "  FROM modules "
+                                   "  WHERE module_ident = %s", (ident,))
+                    id, version, type = cursor.fetchone()
+                    print("-- INSERTED -- ident={} id={} version={} type={}" \
+                              .format(ident, id, version, type))
 
 
 if __name__ == '__main__':
