@@ -155,7 +155,7 @@ class Populator:
         """
         module_idents = []
         for metadata, content in self.resolver(mid):
-            m_ident = self.insert_module(metadata, content)
+            m_ident, m_type = self.insert_module(metadata, content)
             module_idents.append(m_ident)
         # TODO resolve modules connected to a resource.
         # TODO resolve resources for each module.
@@ -178,14 +178,15 @@ class Populator:
                     _insert_subject_for_module(subject, module_ident, cursor)
                 for keyword in module_data['keywords']:
                     _insert_keyword_for_module(keyword, module_ident, cursor)
-        return module_ident
+        return module_ident, module_type
 
     def _translate_module_idents(self, idents=[]):
         translated = []
         with psycopg2.connect(self.connection_string) as db_connection:
             with db_connection.cursor() as cursor:
                 for ident in idents:
-                    cursor.execute("SELECT moduleid, version from modules "
+                    cursor.execute("SELECT moduleid, version, portal_type "
+                                   "  FROM modules "
                                    "  WHERE module_ident = %s", (ident,))
                     translated.append(cursor.fetchone())
         return translated
@@ -207,8 +208,9 @@ def main(argv=None):
     with psycopg2.connect(args.connection_string) as db_connection:
         for mid in args.modules:
             idents = populator(mid)
-            for id, version in idents:
-                print("-- INSERTED -- id={} version={}".format(id, version))
+            for id, version, type in idents:
+                print("-- INSERTED -- id={} version={} type={}" \
+                          .format(id, version, type))
 
 
 if __name__ == '__main__':
