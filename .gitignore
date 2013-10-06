@@ -1,0 +1,14 @@
+# Development #
+###############
+*.pyc
+*.pyo
+*.egg-info
+.tox
+*.log
+*.*~
+.DS_Store
+
+# Build file #
+##############
+build/
+dist/
