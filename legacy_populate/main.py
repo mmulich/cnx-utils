@@ -69,7 +69,9 @@ class Resolver:
         resp = requests.get("{}/content_info".format(self.to_url(mid)))
         doc = lxml.html.parse(BytesIO(resp.content))
         xpath_exp = '//div[@id="cnx_history_section"]//a[@class="cnxn"]/text()'
-        return doc.xpath(xpath_exp)
+        versions = doc.xpath(xpath_exp)
+        versions.reverse()
+        return versions
 
 
 
