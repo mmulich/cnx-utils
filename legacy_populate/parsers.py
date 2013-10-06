@@ -86,7 +86,11 @@ def parse_collection_xml(fp):
     and a list of content ids that are part of this collection.
     """
     # Parse the document
-    tree = lxml.etree.parse(fp)
+    try:
+        tree = lxml.etree.parse(fp)
+    except lxml.etree.XMLSyntaxError as exc:
+        print(fp.read())
+        raise exc
     doc = tree.getroot()
     xpath = _generate_xpath_func(doc, 'colxml')
 
@@ -98,7 +102,11 @@ def parse_collection_xml(fp):
 def parse_collection_xml_contents(fp):
     """Parse the file to find the collections contents."""
     # Parse the document
-    tree = lxml.etree.parse(fp)
+    try:
+        tree = lxml.etree.parse(fp)
+    except lxml.etree.XMLSyntaxError as exc:
+        print(fp.read())
+        raise exc
     doc = tree.getroot()
     xpath = _generate_xpath_func(doc, 'colxml')
     return xpath('//colxml:module/@document')[:]
@@ -111,7 +119,11 @@ def parse_module_xml(fp):
     and a list of resource urls that are in the content.
     """
     # Parse the document
-    tree = lxml.etree.parse(fp)
+    try:
+        tree = lxml.etree.parse(fp)
+    except lxml.etree.XMLSyntaxError as exc:
+        print(fp.read())
+        raise exc
     doc = tree.getroot()
     xpath = _generate_xpath_func(doc, 'cnxml')
 
