@@ -156,7 +156,14 @@ class Populator:
         of this module.
         """
         for metadata, content in self.resolver(mid):
-            m_ident, m_type = self.insert_module(metadata, content)
+            m_ident = self.get_module_ident_from_metadata(metadata['metadata'])
+            if m_ident is None:
+                m_ident, m_type = self.insert_module(metadata, content)
+                self.report_activity_on_ident('inserted', m_ident)
+            else:
+                m_type = self.get_module_type_from_ident(m_ident)
+                self.report_activity_on_ident('exists',
+                                              m_ident)
             yield m_ident
             # Resolve modules connected to a module.
             if m_type == COLLECTION:
@@ -165,6 +172,32 @@ class Populator:
                         yield ext_ident
         # TODO Resolve resources for each module.
         raise StopIteration
+
+    def get_module_ident_from_metadata(self, metadata):
+        mid = metadata['moduleid']
+        version = metadata['version']
+        with psycopg2.connect(self.connection_string) as db_connection:
+            with db_connection.cursor() as cursor:
+                cursor.execute("SELECT module_ident FROM modules "
+                               "  WHERE moduleid = %s AND version = %s",
+                               (mid, version,))
+                try:
+                    ident = cursor.fetchone()[0]
+                except TypeError:  # 'NoneType' object is not subscriptable
+                    ident = None
+        return ident
+
+    def get_module_type_from_ident(self, ident):
+        with psycopg2.connect(self.connection_string) as db_connection:
+            with db_connection.cursor() as cursor:
+                cursor.execute("SELECT portal_type AS type FROM modules "
+                               "  WHERE module_ident = %s", (ident,))
+                try:
+                    type = cursor.fetchone()[0]
+                except TypeError:  # 'NoneType' object is not subscriptable
+                    raise ValueError("Module at '{}' probably doesn't "
+                                     "exist.".format(ident))
+        return type
 
     def insert_module(self, module_data, document):
         metadata = module_data['metadata']
@@ -197,6 +230,18 @@ class Populator:
         mids = parsers.parse_collection_xml_contents(BytesIO(file[:]))
         return mids
 
+    def report_activity_on_ident(self, activity, ident):
+        """Print a statement about the activity on the given ident."""
+        with psycopg2.connect(self.connection_string) as db_connection:
+            with db_connection.cursor() as cursor:
+                cursor.execute("SELECT moduleid, version, portal_type "
+                               "  FROM modules "
+                               "  WHERE module_ident = %s", (ident,))
+                id, version, type = cursor.fetchone()
+                print("-- {} -- ident={} id={} version={} type={}" \
+                          .format(activity.upper(), ident, id, version, type))
+
+
 
 def main(argv=None):
     """command interface to the utility"""
@@ -211,16 +256,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     populator = Populator(args.connection_string, args.source_host)
 
+    idents = []
     for mid in args.modules:
-        for ident in populator(mid):
-            with psycopg2.connect(args.connection_string) as db_connection:
-                with db_connection.cursor() as cursor:
-                    cursor.execute("SELECT moduleid, version, portal_type "
-                                   "  FROM modules "
-                                   "  WHERE module_ident = %s", (ident,))
-                    id, version, type = cursor.fetchone()
-                    print("-- INSERTED -- ident={} id={} version={} type={}" \
-                              .format(ident, id, version, type))
+        idents.extend([ident for ident in populator(mid)])
+    print("Worked on {}.".format(', '.join(idents)))
 
 
 if __name__ == '__main__':
