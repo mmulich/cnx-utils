@@ -100,7 +100,13 @@ class Resolver:
 
     def __call__(self, mid):
         for version in self.get_versions(mid):
-            url = self.to_source_url(mid, version)
+            # XXX Necessary to work around an issue on cnx.org where collection
+            #     source for previous versions is inaccessible.
+            if mid.startswith('c'):
+                source_version = self.get_latest_version(mid)
+            else:
+                source_version = version
+            url = self.to_source_url(mid, source_version)
 
             if self.is_cache_enabled:
                 self.report_activity('retrieving cache', "for: {}".format(url))
@@ -120,6 +126,11 @@ class Resolver:
                 self._invalidate_document(url)
                 raise
 
+            # XXX Part of the cnx.org collection source inaccessibility
+            #     workaround. Fix the version contrary to what the document
+            #     has in it.
+            metadata['metadata']['version'] = version
+
             yield metadata, document
         raise StopIteration
 
@@ -130,7 +141,9 @@ class Resolver:
 
     def get_versions(self, mid):
         """Parse the html document to find the versions for this module."""
-        latest_version = self.get_latest_version(mid)
+        # XXX cnx.org protects the method on modules for getting the version.
+        #     So screw it and use 'latests' for this part.
+        latest_version = mid.startswith('m') and 'latest' or self.get_latest_version(mid)
         url = "{}/content_info".format(self.to_url(mid, latest_version))
         if self.is_cache_enabled:
             self.report_activity('using cache', url)
