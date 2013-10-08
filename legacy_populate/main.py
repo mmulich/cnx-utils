@@ -2,6 +2,8 @@
 import os
 import argparse
 from io import BytesIO
+import sqlite3
+
 import lxml.html
 import psycopg2
 import requests
@@ -19,6 +21,11 @@ TYPES_TO_FILENAMES = {
     MODULE: 'index.cnxml',
     COLLECTION: 'collection.xml',
     }
+
+CACHE_DIRECTORY = os.path.expanduser('~/.cache/cnx-utils/legacy_populate')
+if not os.path.exists(CACHE_DIRECTORY):
+    os.makedirs(CACHE_DIRECTORY)
+RESOLVER_CACHE_FILEPATH = os.path.join(CACHE_DIRECTORY, 'resolver.db')
 
 
 def id_to_type(id):
@@ -41,14 +48,49 @@ def parse_to_metadata(type, document):
     parsed_item_keys = ['abstract', 'license_url', 'metadata',
                         'keywords', 'subjects',
                         ]
-    return dict(zip(parsed_item_keys, parser(BytesIO(document))))
+    return dict(zip(parsed_item_keys,
+                    parser(BytesIO(document.encode('utf8')))))
 
 
 class Resolver:
     """utility for source resolution about a piece of content."""
 
-    def __init__(self, host):
+    def __init__(self, host, enable_cache=True):
         self.host = host
+        self.is_cache_enabled = enable_cache
+        self._cache_connection = sqlite3.connect(RESOLVER_CACHE_FILEPATH)
+        self._cache_setup()
+
+    def report_activity(self, activity, message):
+        print("-- {} -- {}".format(activity.upper(), message))
+
+    def _cache_setup(self):
+        with self._cache_connection as cursor:
+            cursor.execute("CREATE TABLE IF NOT EXISTS 'modules_cache' ("
+                           "  url TEXT PRIMARY KEY, "
+                           "  document TEXT );")
+
+    def _retrieve_document(self, url):
+        with self._cache_connection as cursor:
+            e = cursor.execute("SELECT document "
+                               "  FROM modules_cache WHERE url = ?;",
+                               (url,))
+            try:
+                document = e.fetchone()[0]
+            except TypeError:
+                document = None
+        return document
+
+    def _cache_document(self, url, document):
+        with self._cache_connection as cursor:
+            cursor.execute("INSERT INTO modules_cache "
+                           "  (url, document) VALUES (?, ?);",
+                           (url, document,))
+
+    def _invalidate_document(self, url):
+        with self._cache_connection as cursor:
+            cursor.execute("DELETE FROM modules_cache WHERE url = ?",
+                           (url,))
 
     def to_url(self, mid, version='latest'):
         return "http://{}/content/{}/{}".format(self.host, mid, version)
@@ -58,28 +100,63 @@ class Resolver:
 
     def __call__(self, mid):
         for version in self.get_versions(mid):
-            resp = requests.get(self.to_source_url(mid, version))
-            document = resp.content
-            metadata = parse_to_metadata(id_to_type(mid), document)
+            url = self.to_source_url(mid, version)
+
+            if self.is_cache_enabled:
+                self.report_activity('retrieving cache', "for: {}".format(url))
+                document = self._retrieve_document(url)
+            else:
+                self._invalidate_document(url)
+                document = None
+            if document is None:
+                self.report_activity('requesting', url)
+                resp = requests.get(url)
+                document = unicode(resp.content, 'utf8')
+                self._cache_document(url, document)
+
+            try:
+                metadata = parse_to_metadata(id_to_type(mid), document)
+            except:
+                self._invalidate_document(url)
+                raise
+
             yield metadata, document
         raise StopIteration
 
+    def get_latest_version(self, mid):
+        """Retrieve the latest version of a module."""
+        resp = requests.get("{}/getVersion".format(self.to_url(mid)))
+        return resp.text.strip()
+
     def get_versions(self, mid):
         """Parse the html document to find the versions for this module."""
-        resp = requests.get("{}/content_info".format(self.to_url(mid)))
-        doc = lxml.html.parse(BytesIO(resp.content))
+        latest_version = self.get_latest_version(mid)
+        url = "{}/content_info".format(self.to_url(mid, latest_version))
+        if self.is_cache_enabled:
+            self.report_activity('using cache', url)
+            document = self._retrieve_document(url)
+        else:
+            self._invalidate_document(url)
+            document = None
+        if document is None:
+            self.report_activity('requesting', url)
+            resp = requests.get(url)
+            document = unicode(resp.content, 'utf8')
+            self.report_activity('caching', url)
+            self._cache_document(url, document)
+
+        try:
+            doc = lxml.html.parse(BytesIO(document.encode('utf8')))
+        except:
+            self._invalidate_document(url)
+            raise
         xpath_exp = '//div[@id="cnx_history_section"]//a[@class="cnxn"]/text()'
         versions = doc.xpath(xpath_exp)
         versions.reverse()
+        self.report_activity('working', "versions for '{}': {}" \
+                                 .format(mid, ', '.join(versions)))
         return versions
 
-
-
-def resolve_to_content(host, mid):
-    """resolve the given id to content.
-    Iterate the content by version in ascending order.
-    If a collection is given, the connected modules will not be resolved.
-    """
 
 def _insert_abstract(abstract_text, cursor):
     """insert the abstract"""
@@ -146,10 +223,10 @@ def _insert_keyword_for_module(keyword, module_id, cursor):
 class Populator:
     """main logic"""
 
-    def __init__(self, connection_string, source_host):
+    def __init__(self, connection_string, source_host, use_cache=True):
         self.connection_string = connection_string
         self.source_host = source_host
-        self.resolver = Resolver(self.source_host)
+        self.resolver = Resolver(self.source_host, enable_cache=use_cache)
 
     def __call__(self, mid):
         """Given the moduleid populate the database with all the versions
@@ -251,10 +328,14 @@ def main(argv=None):
     parser.add_argument('-c', '--connection-string',
                         default="dbname=rhaptos_dev_db",
                         help="database connection string passed to psycopg2")
+    parser.add_argument('--disable-cache', dest="is_cache_enabled",
+                        action="store_false",
+                        help="Disable the source resolution cache")
     parser.add_argument('modules', nargs='+',
                         help="document ids (example, m42119)")
     args = parser.parse_args(argv)
-    populator = Populator(args.connection_string, args.source_host)
+    populator = Populator(args.connection_string, args.source_host,
+                          use_cache=args.is_cache_enabled)
 
     idents = []
     for mid in args.modules:
