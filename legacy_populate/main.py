@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 import os
 import argparse
-from io import BytesIO
+import hashlib
 import sqlite3
+from io import BytesIO
 
 import lxml.html
 import psycopg2
@@ -134,6 +135,27 @@ class Resolver:
             yield metadata, document
         raise StopIteration
 
+    def get_module_resources(self, mid, version,
+                             has_resource_callback=None):
+        url = self.to_url(mid, version)
+        contents_url = "{}/objectIds".format(url)
+        resp = requests.get(contents_url)
+        # XXX Evil but in a crunch.
+        resources = eval(resp.text)
+        resources.pop(resources.index('index.cnxml'))
+        if has_resource_callback is not None:
+            has_resources_callback = lambda filename: False
+        for filename in resources:
+            has_resource = has_resource_callback(filename)
+            if has_resource:
+                continue
+            resource_url = "{}/{}".format(url, filename)
+            resp = requests.get(resource_url)
+            mimetype = resp.headers['content-type']
+            file = BytesIO(resp.content)
+            yield filename, mimetype, file
+        raise StopIteration
+
     def get_latest_version(self, mid):
         """Retrieve the latest version of a module."""
         resp = requests.get("{}/getVersion".format(self.to_url(mid)))
@@ -201,15 +223,30 @@ def _insert_module_file(module_id, filename, mimetype, file, cursor):
         file = file.read()
     except AttributeError:
         pass
-    payload = (psycopg2.Binary(file.encode('utf8')),)
-    cursor.execute("INSERT INTO files (file) VALUES (%s) "
-                   "RETURNING fileid;", payload)
-    file_id = cursor.fetchone()[0]
+    if isinstance(file, unicode):
+        file = file.encode('utf8')
+    payload = (psycopg2.Binary(file),)
+    md5 = hashlib.md5()
+    md5.update(file)
+    cursor.execute("SELECT fileid FROM files WHERE md5 = %s",
+                   (md5.hexdigest(),))
+    try:
+        file_id = cursor.fetchone()[0]
+    except TypeError:
+        file_id = None
+
+    if file_id is None:
+        cursor.execute("INSERT INTO files (file) VALUES (%s) "
+                       "RETURNING fileid;", payload)
+        file_id = cursor.fetchone()[0]
+
     cursor.execute("INSERT INTO module_files "
                    "  (module_ident, fileid, filename, "
                    "   mimetype) "
                    "  VALUES (%s, %s, %s, %s) ",
                    (module_id, file_id, filename, mimetype,))
+    return file_id
+
 def _insert_subject_for_module(subject_text, module_id, cursor):
     cursor.execute("INSERT INTO moduletags (module_ident, tagid) "
                    "  VALUES (%s, "
@@ -252,15 +289,24 @@ class Populator:
                 self.report_activity_on_ident('inserted', m_ident)
             else:
                 m_type = self.get_module_type_from_ident(m_ident)
-                self.report_activity_on_ident('exists',
-                                              m_ident)
+                self.report_activity_on_ident('exists', m_ident)
             yield m_ident
             # Resolve modules connected to a module.
             if m_type == COLLECTION:
                 for ext_mid in self._get_module_contents(m_ident):
                     for ext_ident in self(ext_mid):
                         yield ext_ident
-        # TODO Resolve resources for each module.
+            # Resolve resources for each module.
+            elif m_type == MODULE:
+                version = self._get_module_version(m_ident)
+                has_resource_callback = self._generate_resource_callback(m_ident)
+                resources = self.resolver.get_module_resources(
+                        mid, version, has_resource_callback)
+                for filename, mimetype, file in resources:
+                    self.insert_module_file(m_ident, filename, mimetype, file)
+                    self.report_activity('inserted',
+                                         "resource '{}' for module with '{}' "
+                                         "ident".format(filename, m_ident))
         raise StopIteration
 
     def get_module_ident_from_metadata(self, metadata):
@@ -308,6 +354,13 @@ class Populator:
                     _insert_keyword_for_module(keyword, module_ident, cursor)
         return module_ident, module_type
 
+    def insert_module_file(self, module_ident, filename, mimetype, file):
+        with psycopg2.connect(self.connection_string) as db_connection:
+            with db_connection.cursor() as cursor:
+                _insert_module_file(module_ident, filename, mimetype,
+                                    file, cursor)
+        return
+
     def _get_module_contents(self, ident):
         with psycopg2.connect(self.connection_string) as db_connection:
             with db_connection.cursor() as cursor:
@@ -320,6 +373,31 @@ class Populator:
         mids = parsers.parse_collection_xml_contents(BytesIO(file[:]))
         return mids
 
+    def _get_module_version(self, ident):
+        with psycopg2.connect(self.connection_string) as db_connection:
+            with db_connection.cursor() as cursor:
+                cursor.execute("SELECT version from modules "
+                               "  WHERE module_ident = %s;",
+                               (ident,))
+                version = cursor.fetchone()[0]
+        return version
+
+    def _generate_resource_callback(self, ident):
+        def callback(filename):
+            with psycopg2.connect(self.connection_string) as db_connection:
+                with db_connection.cursor() as cursor:
+                    cursor.execute("SELECT 'T'::bool FROM module_files "
+                                   "  WHERE module_ident = %s "
+                                   "        AND filename = %s;",
+                                   (ident, filename))
+                    is_found = cursor.fetchone()
+            return is_found is not None and True or False
+        return callback
+
+    def report_activity(self, activity, message):
+        """Print a statement about the activity."""
+        print("-- {} -- {}".format(activity.upper(), message))
+
     def report_activity_on_ident(self, activity, ident):
         """Print a statement about the activity on the given ident."""
         with psycopg2.connect(self.connection_string) as db_connection:
@@ -328,9 +406,9 @@ class Populator:
                                "  FROM modules "
                                "  WHERE module_ident = %s", (ident,))
                 id, version, type = cursor.fetchone()
-                print("-- {} -- ident={} id={} version={} type={}" \
-                          .format(activity.upper(), ident, id, version, type))
-
+        message = "ident={} id={} version={} type={}" \
+                .format(ident, id, version, type)
+        self.report_activity(activity, message)
 
 
 def main(argv=None):
