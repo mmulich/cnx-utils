@@ -201,7 +201,7 @@ def _insert_module_file(module_id, filename, mimetype, file, cursor):
         file = file.read()
     except AttributeError:
         pass
-    payload = (psycopg2.Binary(file),)
+    payload = (psycopg2.Binary(file.encode('utf8')),)
     cursor.execute("INSERT INTO files (file) VALUES (%s) "
                    "RETURNING fileid;", payload)
     file_id = cursor.fetchone()[0]
@@ -353,7 +353,7 @@ def main(argv=None):
     idents = []
     for mid in args.modules:
         idents.extend([ident for ident in populator(mid)])
-    print("Worked on {}.".format(', '.join(idents)))
+    print("Worked on {}.".format(', '.join([str(x) for x in idents])))
 
 
 if __name__ == '__main__':
